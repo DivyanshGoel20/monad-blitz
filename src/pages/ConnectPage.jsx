@@ -1,10 +1,11 @@
 import { useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { useConnect, useAccount } from 'wagmi'
+import { useConnect, useAccount, useDisconnect } from 'wagmi'
 
 export default function ConnectPage() {
   const navigate = useNavigate()
   const { isConnected } = useAccount()
+  const { disconnect } = useDisconnect()
   const { connect, connectors, isPending, error } = useConnect()
   const injectedConnector = connectors[0]
 
@@ -13,6 +14,15 @@ export default function ConnectPage() {
       navigate('/game', { replace: true })
     }
   }, [isConnected, navigate])
+
+  const handleConnect = () => {
+    if (!injectedConnector || isPending) return
+    // Clear any stale connector state so "already connected" doesn't block reconnect
+    disconnect()
+    setTimeout(() => {
+      connect({ connector: injectedConnector })
+    }, 50)
+  }
 
   return (
     <div className="connect-page">
@@ -26,7 +36,7 @@ export default function ConnectPage() {
           <button
             type="button"
             className="connect-btn"
-            onClick={() => injectedConnector && connect({ connector: injectedConnector })}
+            onClick={handleConnect}
             disabled={isPending || !injectedConnector}
           >
             {isPending ? 'Connecting…' : 'Connect Wallet'}
