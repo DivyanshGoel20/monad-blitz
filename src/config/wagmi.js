@@ -4,7 +4,7 @@ import { defineChain } from 'viem'
 /**
  * Monad Testnet
  * Chain ID: 10143
- * RPC: https://rpc.testnet.monad.xyz
+ * RPC: Alchemy endpoint (configured in transports)
  * Explorer: https://testnet.monadscan.com
  * Token: MON
  */
@@ -33,6 +33,6 @@ export const config = createConfig({
   chains: [monadTestnet],
   connectors: [injected()],
   transports: {
-    [monadTestnet.id]: http(),
+    [monadTestnet.id]: http('https://monad-testnet.g.alchemy.com/v2/Efa1xpDsuSqeFT7TPlJ_6'),
   },
 })
