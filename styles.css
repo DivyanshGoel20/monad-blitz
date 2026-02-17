@@ -73,6 +73,115 @@ body {
   color: var(--text-muted);
 }
 
+.wallet-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 10px;
+}
+
+.wallet-address {
+  font-family: ui-monospace, monospace;
+  font-size: 0.85rem;
+  color: var(--text-muted);
+}
+
+.btn-wallet {
+  padding: 4px 10px;
+  font-size: 0.75rem;
+  border-radius: 999px;
+  border: 1px solid rgba(148, 163, 184, 0.5);
+  background: rgba(15, 23, 42, 0.8);
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.btn-wallet:hover {
+  color: var(--text-main);
+  border-color: rgba(248, 250, 252, 0.5);
+}
+
+/* Connect (landing) page */
+.connect-page {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 100vh;
+  width: 100%;
+  padding: 20px;
+}
+
+.connect-card {
+  max-width: 420px;
+  width: 100%;
+  padding: 32px 28px;
+  border-radius: 24px;
+  background: rgba(15, 23, 42, 0.92);
+  border: 1px solid rgba(148, 163, 184, 0.25);
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.6);
+  text-align: center;
+}
+
+.connect-title {
+  margin: 0 0 8px;
+  font-size: 1.75rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  font-weight: 700;
+  color: #fef3c7;
+}
+
+.connect-subtitle {
+  margin: 0 0 20px;
+  font-size: 0.95rem;
+  color: var(--text-muted);
+  line-height: 1.4;
+}
+
+.connect-chain {
+  margin: 0 0 24px;
+  font-size: 0.8rem;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  color: var(--accent-soft);
+}
+
+.connect-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.connect-btn {
+  width: 100%;
+  padding: 14px 20px;
+  font-size: 1rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  border-radius: 14px;
+  border: 1px solid rgba(252, 211, 77, 0.5);
+  background: linear-gradient(135deg, var(--accent), var(--accent-strong));
+  color: #111827;
+  cursor: pointer;
+  transition: transform 0.12s ease, box-shadow 0.12s ease;
+}
+
+.connect-btn:hover:not(:disabled) {
+  transform: translateY(-1px);
+  box-shadow: 0 12px 28px rgba(249, 115, 22, 0.4);
+}
+
+.connect-btn:disabled {
+  opacity: 0.85;
+  cursor: not-allowed;
+}
+
+.connect-error {
+  margin: 16px 0 0;
+  font-size: 0.85rem;
+  color: #fca5a5;
+}
+
 .game-stage {
   position: relative;
   flex: 1;
