@@ -51,17 +51,18 @@ const SAUCE_GRADIENTS = {
     'radial-gradient(circle at 30% 0, rgba(248, 150, 108, 0.95) 0, rgba(185, 60, 39, 0.9) 35%, rgba(120, 35, 20, 0.95) 75%, rgba(0, 0, 0, 0.9) 100%)',
 }
 
-// Spread cheese and toppings across the pizza (positions as %)
-// Positions inside the sauce circle only (sauce is inset 10%, so keep within ~22%–78%)
+// Cheese and toppings inside the sauce with clear gaps between each piece
+// Cheese: 3×3 grid at 28% / 50% / 72% (~22% gap between pieces)
 const CHEESE_SPREAD = [
-  { top: '26%', left: '30%' }, { top: '28%', left: '52%' }, { top: '26%', left: '70%' },
-  { top: '48%', left: '26%' }, { top: '50%', left: '50%' }, { top: '48%', left: '72%' },
-  { top: '72%', left: '30%' }, { top: '74%', left: '52%' }, { top: '72%', left: '70%' },
+  { top: '28%', left: '28%' }, { top: '28%', left: '50%' }, { top: '28%', left: '72%' },
+  { top: '50%', left: '28%' }, { top: '50%', left: '50%' }, { top: '50%', left: '72%' },
+  { top: '72%', left: '28%' }, { top: '72%', left: '50%' }, { top: '72%', left: '72%' },
 ]
+// Toppings: ring + middle row, offset from cheese so layers don’t stack (~20% gaps)
 const TOPPING_SPREAD = [
-  { top: '24%', left: '38%' }, { top: '26%', left: '60%' }, { top: '38%', left: '24%' },
-  { top: '38%', left: '56%' }, { top: '58%', left: '38%' }, { top: '60%', left: '72%' },
-  { top: '74%', left: '26%' }, { top: '74%', left: '60%' }, { top: '50%', left: '40%' }, { top: '40%', left: '72%' },
+  { top: '32%', left: '35%' }, { top: '32%', left: '65%' }, { top: '38%', left: '32%' }, { top: '38%', left: '68%' },
+  { top: '50%', left: '35%' }, { top: '50%', left: '65%' }, { top: '62%', left: '32%' }, { top: '62%', left: '68%' },
+  { top: '68%', left: '50%' }, { top: '38%', left: '50%' },
 ]
 
 const EXPLORER_URL = 'https://testnet.monadscan.com'
@@ -91,6 +92,42 @@ function calculateFee(tx, block) {
     return tx.gas * tx.gasPrice
   }
   return null
+}
+
+/** Format fee for display: null/undefined → "0 MON", otherwise round to 3 decimals and append " MON". */
+function formatFeeMon(fee, formatEtherFn) {
+  if (fee == null) return '0.000 MON'
+  const raw = fee === 0n ? '0' : formatEtherFn(fee)
+  const num = parseFloat(raw)
+  const rounded = Number.isNaN(num) ? '0.000' : Number(num).toFixed(3)
+  return `${rounded} MON`
+}
+
+/** Fee as numeric value for console: null → 0, otherwise rounded to 3 decimals. */
+function feeAsNumber(fee, formatEtherFn) {
+  if (fee == null) return 0
+  const raw = fee === 0n ? '0' : formatEtherFn(fee)
+  const num = parseFloat(raw)
+  return Number.isNaN(num) ? 0 : parseFloat(Number(num).toFixed(3))
+}
+
+/** Build array of transaction hashes and fees in order: sauces, then cheeses, then toppings. */
+function buildTxHashesAndFees(blocks, formatEtherFn) {
+  const out = []
+  const categories = [
+    { key: 'sauce', label: 'sauce' },
+    { key: 'cheese', label: 'cheese' },
+    { key: 'topping', label: 'topping' },
+  ]
+  for (const { key, label } of categories) {
+    const block = blocks[key]
+    const txs = Array.isArray(block?.transactions) ? block.transactions : []
+    for (const tx of txs) {
+      const fee = calculateFee(tx, block)
+      out.push({ type: label, hash: tx.hash, fee: feeAsNumber(fee, formatEtherFn) })
+    }
+  }
+  return out
 }
 
 // Map method ID to ingredient (deterministic based on method ID hash)
@@ -128,27 +165,24 @@ export default function GamePage() {
     return () => window.clearInterval(id)
   }, [])
 
-  // Fetch 3 random blocks on mount
+  // Fetch latest block (sauce) and two previous (cheese, topping) on mount
   useEffect(() => {
-    const fetchRandomBlocks = async () => {
+    const fetchBlocks = async () => {
       if (!publicClient) return
       setLoading(true)
       setError(null)
       try {
         const latestBlock = await publicClient.getBlock({ blockTag: 'latest' })
         const latestNum = Number(latestBlock.number)
-        
-        // Generate 3 random block numbers
-        const randomBlocks = []
-        for (let i = 0; i < 3; i++) {
-          const randomOffset = Math.floor(Math.random() * 100) + 1
-          randomBlocks.push(BigInt(Math.max(1, latestNum - randomOffset)))
-        }
+        // Sauce = latest, Cheese = latest - 1, Topping = latest - 2
+        const sauceBlockNum = BigInt(latestNum)
+        const cheeseBlockNum = BigInt(Math.max(1, latestNum - 1))
+        const toppingBlockNum = BigInt(Math.max(1, latestNum - 2))
 
         const [sauceBlock, cheeseBlock, toppingBlock] = await Promise.all([
-          publicClient.getBlock({ blockNumber: randomBlocks[0], includeTransactions: true }),
-          publicClient.getBlock({ blockNumber: randomBlocks[1], includeTransactions: true }),
-          publicClient.getBlock({ blockNumber: randomBlocks[2], includeTransactions: true }),
+          publicClient.getBlock({ blockNumber: sauceBlockNum, includeTransactions: true }),
+          publicClient.getBlock({ blockNumber: cheeseBlockNum, includeTransactions: true }),
+          publicClient.getBlock({ blockNumber: toppingBlockNum, includeTransactions: true }),
         ])
 
         setBlocks({ sauce: sauceBlock, cheese: cheeseBlock, topping: toppingBlock })
@@ -174,8 +208,15 @@ export default function GamePage() {
       }
     }
 
-    fetchRandomBlocks()
+    fetchBlocks()
   }, [publicClient])
+
+  // Log transaction hashes and fees (sauces, cheeses, toppings) to console when blocks are loaded
+  useEffect(() => {
+    if (!blocks.sauce || !blocks.cheese || !blocks.topping) return
+    const arr = buildTxHashesAndFees(blocks, formatEther)
+    console.log('Transaction hashes and fees (sauce → cheese → topping):', arr)
+  }, [blocks.sauce, blocks.cheese, blocks.topping])
 
   const mm = String(Math.floor(timeLeft / 60)).padStart(2, '0')
   const ss = String(timeLeft % 60).padStart(2, '0')
@@ -297,7 +338,7 @@ export default function GamePage() {
                           <span className="tx-value">{tx.to ? formatAddress(tx.to) : 'Contract'}</span>
                         </div>
                       </button>
-                      <div className="tx-fee-below">{fee != null ? `${fee === 0n ? '0' : formatEther(fee)} MON` : '—'}</div>
+                      <div className="tx-fee-below">{formatFeeMon(fee, formatEther)}</div>
                     </div>
                   )
                 })}
@@ -335,7 +376,7 @@ export default function GamePage() {
                           <span className="tx-value">{tx.to ? formatAddress(tx.to) : 'Contract'}</span>
                         </div>
                       </button>
-                      <div className="tx-fee-below">{fee != null ? `${fee === 0n ? '0' : formatEther(fee)} MON` : '—'}</div>
+                      <div className="tx-fee-below">{formatFeeMon(fee, formatEther)}</div>
                     </div>
                   )
                 })}
@@ -373,7 +414,7 @@ export default function GamePage() {
                           <span className="tx-value">{tx.to ? formatAddress(tx.to) : 'Contract'}</span>
                         </div>
                       </button>
-                      <div className="tx-fee-below">{fee != null ? `${fee === 0n ? '0' : formatEther(fee)} MON` : '—'}</div>
+                      <div className="tx-fee-below">{formatFeeMon(fee, formatEther)}</div>
                     </div>
                   )
                 })}
