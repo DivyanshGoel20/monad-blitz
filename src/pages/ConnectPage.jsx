@@ -43,6 +43,11 @@ export default function ConnectPage() {
           </button>
         </div>
 
+        {!injectedConnector && (
+          <p className="connect-error" style={{ marginTop: 12 }}>
+            No Web3 wallet found. Install MetaMask or another injected wallet and refresh.
+          </p>
+        )}
         {error && (
           <p className="connect-error">{error.message}</p>
         )}

@@ -1,7 +1,9 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { useAccount, useDisconnect, usePublicClient } from 'wagmi'
+import { useAccount, useDisconnect, usePublicClient, useReadContract, useWriteContract } from 'wagmi'
 import { formatEther } from 'viem'
+import { pizzaContract, PIZZA_CONTRACT_ADDRESS } from '../contracts/pizza'
+import { pizzaAbi } from '../contracts/pizzaAbi'
 
 const ALL_INGREDIENTS = {
   sauce: [
@@ -72,6 +74,16 @@ function formatHash(hash) {
   return `${hash.slice(0, 8)}…${hash.slice(-6)}`
 }
 
+/** Fisher–Yates shuffle; returns a new array. */
+function shuffleArray(arr) {
+  const out = [...arr]
+  for (let i = out.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [out[i], out[j]] = [out[j], out[i]]
+  }
+  return out
+}
+
 function formatAddress(addr) {
   if (!addr) return '—'
   return `${addr.slice(0, 6)}…${addr.slice(-4)}`
@@ -130,117 +142,286 @@ function buildTxHashesAndFees(blocks, formatEtherFn) {
   return out
 }
 
-// Map method ID to ingredient (deterministic based on method ID hash)
-function mapMethodIdToIngredient(methodId, category) {
-  if (!methodId || methodId === '0x') return null
+// Map txn hash to ingredient using same formula as contract (_hashToTopping / _hashToSauce / _hashToCheese)
+function hashToIngredient(hash, category) {
   const items = ALL_INGREDIENTS[category]
-  if (!items || items.length === 0) return null
-  
-  // Use method ID as seed for deterministic mapping
-  const hash = parseInt(methodId.slice(2, 10), 16)
-  const index = hash % items.length
-  return items[index]
+  if (!items?.length || !hash) return null
+  const h = typeof hash === 'string' ? (hash.startsWith('0x') ? BigInt(hash) : BigInt('0x' + hash)) : BigInt(hash)
+  const index = Number(h % BigInt(items.length))
+  return items[Math.min(index, items.length - 1)]
+}
+
+/** Ensure bytes32 for contract: 0x + 64 hex chars */
+function toBytes32(hexHash) {
+  if (!hexHash) return undefined
+  const clean = hexHash.startsWith('0x') ? hexHash.slice(2) : hexHash
+  return '0x' + clean.padStart(64, '0').slice(-64)
 }
 
 export default function GamePage() {
   const navigate = useNavigate()
-  const { address, isConnected } = useAccount()
+  const { address, isConnected, chainId } = useAccount()
   const { disconnect } = useDisconnect()
+  const MONAD_TESTNET_ID = 10143
   const publicClient = usePublicClient()
-  const [timeLeft, setTimeLeft] = useState(60)
+  const { mutate: writePizzaMutate, isPending: isWritePending, error: writeError } = useWriteContract()
+
   const [selectedTxHash, setSelectedTxHash] = useState({ sauce: null, cheese: null, topping: null })
   const [blocks, setBlocks] = useState({ sauce: null, cheese: null, topping: null })
-  const [loading, setLoading] = useState(false)
+  const [loadingBlocks, setLoadingBlocks] = useState(false)
   const [error, setError] = useState(null)
-  const [customerOrder, setCustomerOrder] = useState({ sauce: null, cheese: null, topping: null })
+  const [startRoundFeedback, setStartRoundFeedback] = useState(null)
+
+  const contractAddress = pizzaContract?.address ?? undefined
+  const contractAbi = pizzaContract?.abi ?? undefined
+  const contractEnabled = !!contractAddress && !!contractAbi
+
+  const readContractConfig = { address: contractAddress, abi: contractAbi, query: { enabled: contractEnabled } }
+  const { data: owner } = useReadContract({
+    ...readContractConfig,
+    functionName: 'owner',
+  })
+  const { data: currentRoundId = 0n, refetch: refetchCurrentRoundId } = useReadContract({
+    ...readContractConfig,
+    functionName: 'currentRoundId',
+  })
+  const { data: currentRoundOrder, refetch: refetchCurrentRoundOrder } = useReadContract({
+    ...readContractConfig,
+    functionName: 'currentRoundOrder',
+  })
+  const { data: roundDeadline = 0n, refetch: refetchRoundDeadline } = useReadContract({
+    ...readContractConfig,
+    functionName: 'roundDeadline',
+  })
+  const { data: roundStartTime = 0n } = useReadContract({
+    ...readContractConfig,
+    functionName: 'roundStartTime',
+  })
+  const { data: roundOptionLengths, refetch: refetchOptionLengths } = useReadContract({
+    ...readContractConfig,
+    functionName: 'getRoundOptionLengths',
+  })
+
+  const isOwner = address && owner && address.toLowerCase() === owner.toLowerCase()
+  const hasRound = currentRoundId != null && Number(currentRoundId) > 0
+
+  const [timeLeft, setTimeLeft] = useState(0)
+  useEffect(() => {
+    if (!hasRound || !roundDeadline) return
+    const tick = () => {
+      const now = Math.floor(Date.now() / 1000)
+      const left = Math.max(0, Number(roundDeadline) - now)
+      setTimeLeft(left)
+    }
+    tick()
+    const id = setInterval(tick, 1000)
+    return () => clearInterval(id)
+  }, [hasRound, roundDeadline])
+
+  const lengths = roundOptionLengths != null
+    ? (Array.isArray(roundOptionLengths)
+        ? roundOptionLengths
+        : [roundOptionLengths?.toppingLen, roundOptionLengths?.sauceLen, roundOptionLengths?.cheeseLen])
+    : []
+  const toppingLen = Math.max(0, Number(lengths[0]) || 0)
+  const sauceLen = Math.max(0, Number(lengths[1]) || 0)
+  const cheeseLen = Math.max(0, Number(lengths[2]) || 0)
+
+  const [roundOptionData, setRoundOptionData] = useState({ sauce: [], cheese: [], topping: [] })
+  useEffect(() => {
+    if (!contractAddress || !contractAbi || !publicClient || (!toppingLen && !sauceLen && !cheeseLen)) return
+    const read = async (name, index) => {
+      const [hashRes, feeRes] = await Promise.all([
+        publicClient.readContract({ address: contractAddress, abi: contractAbi, functionName: `currentRound${name}Hashes`, args: [BigInt(index)] }),
+        publicClient.readContract({ address: contractAddress, abi: contractAbi, functionName: `currentRound${name}Fees`, args: [BigInt(index)] }),
+      ])
+      return { hash: hashRes, fee: feeRes }
+    }
+    const run = async () => {
+      try {
+        const sauce = await Promise.all(Array.from({ length: sauceLen }, (_, i) => read('Sauce', i)))
+        const cheese = await Promise.all(Array.from({ length: cheeseLen }, (_, i) => read('Cheese', i)))
+        const topping = await Promise.all(Array.from({ length: toppingLen }, (_, i) => read('Topping', i)))
+        setRoundOptionData({ sauce, cheese, topping })
+      } catch (e) {
+        console.error('Failed to load round options:', e)
+        setRoundOptionData({ sauce: [], cheese: [], topping: [] })
+      }
+    }
+    run()
+  }, [contractAddress, contractAbi, publicClient, toppingLen, sauceLen, cheeseLen])
+
+  const customerOrder = useMemo(() => {
+    if (!currentRoundOrder || !hasRound) return { sauce: null, cheese: null, topping: null }
+    const arr = Array.isArray(currentRoundOrder) ? currentRoundOrder : [currentRoundOrder.topping, currentRoundOrder.sauce, currentRoundOrder.cheese]
+    const [toppingIdx, sauceIdx, cheeseIdx] = arr
+    return {
+      sauce: ALL_INGREDIENTS.sauce[Number(sauceIdx)] ?? null,
+      cheese: ALL_INGREDIENTS.cheese[Number(cheeseIdx)] ?? null,
+      topping: ALL_INGREDIENTS.topping[Number(toppingIdx)] ?? null,
+    }
+  }, [currentRoundOrder, hasRound])
+
+  const handleStartRound = () => {
+    setStartRoundFeedback('Preparing…')
+    setError(null)
+    if (!pizzaContract?.address || !blocks.sauce?.transactions?.length || !blocks.cheese?.transactions?.length || !blocks.topping?.transactions?.length) {
+      setError('Fetch blocks first and ensure each block has transactions')
+      setStartRoundFeedback(null)
+      return
+    }
+    const toHash = (tx) => (typeof tx.hash === 'string' ? tx.hash : '0x' + tx.hash.toString(16))
+    const toFee = (tx, block) => {
+      const fee = calculateFee(tx, block)
+      return fee != null ? fee : 0n
+    }
+    const withBytes32 = (tx, block) => {
+      const h = toBytes32(toHash(tx))
+      return h ? { hash: h, fee: toFee(tx, block) } : null
+    }
+    const toPairs = (block) => (block?.transactions ?? [])
+      .map((tx) => withBytes32(tx, block))
+      .filter(Boolean)
+    const saucePairs = toPairs(blocks.sauce)
+    const cheesePairs = toPairs(blocks.cheese)
+    const toppingPairs = toPairs(blocks.topping)
+    const sauceHashes = saucePairs.map((p) => p.hash)
+    const sauceFees = saucePairs.map((p) => p.fee)
+    const cheeseHashes = cheesePairs.map((p) => p.hash)
+    const cheeseFees = cheesePairs.map((p) => p.fee)
+    const toppingHashes = toppingPairs.map((p) => p.hash)
+    const toppingFees = toppingPairs.map((p) => p.fee)
+    if (!sauceHashes.length || !cheeseHashes.length || !toppingHashes.length) {
+      setError('Could not encode transaction hashes. Try fetching blocks again.')
+      setStartRoundFeedback(null)
+      return
+    }
+    setStartRoundFeedback('Open your wallet to sign…')
+    const variables = {
+      address: pizzaContract.address,
+      abi: pizzaAbi,
+      functionName: 'createCustomerOrder',
+      args: [toppingHashes, toppingFees, sauceHashes, sauceFees, cheeseHashes, cheeseFees],
+      chainId: MONAD_TESTNET_ID,
+    }
+    writePizzaMutate(variables, {
+      onSuccess: () => {
+        setStartRoundFeedback(null)
+        // Refetch round data so timer and options update
+        setTimeout(() => {
+          refetchCurrentRoundId()
+          refetchCurrentRoundOrder()
+          refetchRoundDeadline()
+          refetchOptionLengths()
+        }, 500)
+      },
+      onError: (err) => {
+        const msg = err?.shortMessage ?? err?.message ?? err?.cause?.message ?? 'Failed to start round'
+        setError(typeof msg === 'string' ? msg : 'Failed to start round')
+        setStartRoundFeedback(null)
+      },
+      onSettled: () => setStartRoundFeedback(null),
+    })
+  }
+
+  const handleFinalizeRound = () => {
+    if (!pizzaContract?.address) return
+    setError(null)
+    writePizzaMutate(
+      {
+        address: pizzaContract.address,
+        abi: pizzaAbi,
+        functionName: 'finalizeRound',
+        args: [],
+        chainId: MONAD_TESTNET_ID,
+      },
+      {
+        onSuccess: () => {
+          setTimeout(() => {
+            refetchCurrentRoundId()
+            refetchCurrentRoundOrder()
+            refetchRoundDeadline()
+            refetchOptionLengths()
+          }, 500)
+        },
+        onError: (err) => {
+          const msg = err?.shortMessage ?? err?.message ?? err?.cause?.message ?? 'Failed to finalize round'
+          setError(typeof msg === 'string' ? msg : 'Failed to finalize round')
+        },
+      }
+    )
+  }
+
+  const handleSendToOven = () => {
+    if (!pizzaContract?.address || !selectedTxHash.sauce || !selectedTxHash.cheese || !selectedTxHash.topping) {
+      setError('Select one option per category')
+      return
+    }
+    if (timeLeft <= 0) {
+      setError('Submission period has ended')
+      return
+    }
+    setError(null)
+    writePizzaMutate(
+      {
+        address: pizzaContract.address,
+        abi: pizzaAbi,
+        functionName: 'buildOrder',
+        args: [toBytes32(selectedTxHash.topping), toBytes32(selectedTxHash.sauce), toBytes32(selectedTxHash.cheese)],
+        chainId: MONAD_TESTNET_ID,
+      },
+      {
+        onError: (err) => {
+          const msg = err?.shortMessage ?? err?.message ?? err?.cause?.message ?? 'Failed to submit build'
+          setError(typeof msg === 'string' ? msg : 'Failed to submit build')
+        },
+      }
+    )
+  }
 
   useEffect(() => {
     if (!isConnected) navigate('/', { replace: true })
   }, [isConnected, navigate])
 
-  useEffect(() => {
-    const id = window.setInterval(() => {
-      setTimeLeft((prev) => (prev > 0 ? prev - 1 : prev))
-    }, 1000)
-    return () => window.clearInterval(id)
-  }, [])
-
-  // Fetch latest block (sauce) and two previous (cheese, topping) on mount
-  useEffect(() => {
-    const fetchBlocks = async () => {
-      if (!publicClient) return
-      setLoading(true)
-      setError(null)
-      try {
-        const latestBlock = await publicClient.getBlock({ blockTag: 'latest' })
-        const latestNum = Number(latestBlock.number)
-        // Sauce = latest, Cheese = latest - 1, Topping = latest - 2
-        const sauceBlockNum = BigInt(latestNum)
-        const cheeseBlockNum = BigInt(Math.max(1, latestNum - 1))
-        const toppingBlockNum = BigInt(Math.max(1, latestNum - 2))
-
-        const [sauceBlock, cheeseBlock, toppingBlock] = await Promise.all([
-          publicClient.getBlock({ blockNumber: sauceBlockNum, includeTransactions: true }),
-          publicClient.getBlock({ blockNumber: cheeseBlockNum, includeTransactions: true }),
-          publicClient.getBlock({ blockNumber: toppingBlockNum, includeTransactions: true }),
-        ])
-
-        setBlocks({ sauce: sauceBlock, cheese: cheeseBlock, topping: toppingBlock })
-
-        // Generate random customer order from transactions
-        const sauceTxs = Array.isArray(sauceBlock.transactions) ? sauceBlock.transactions : []
-        const cheeseTxs = Array.isArray(cheeseBlock.transactions) ? cheeseBlock.transactions : []
-        const toppingTxs = Array.isArray(toppingBlock.transactions) ? toppingBlock.transactions : []
-
-        const orderSauce = sauceTxs.length > 0 ? sauceTxs[Math.floor(Math.random() * sauceTxs.length)] : null
-        const orderCheese = cheeseTxs.length > 0 ? cheeseTxs[Math.floor(Math.random() * cheeseTxs.length)] : null
-        const orderTopping = toppingTxs.length > 0 ? toppingTxs[Math.floor(Math.random() * toppingTxs.length)] : null
-
-        setCustomerOrder({
-          sauce: orderSauce ? mapMethodIdToIngredient(getMethodId(orderSauce.input), 'sauce') : null,
-          cheese: orderCheese ? mapMethodIdToIngredient(getMethodId(orderCheese.input), 'cheese') : null,
-          topping: orderTopping ? mapMethodIdToIngredient(getMethodId(orderTopping.input), 'topping') : null,
-        })
-      } catch (err) {
-        setError(err.message || 'Failed to fetch blocks')
-      } finally {
-        setLoading(false)
-      }
+  const fetchBlocks = async () => {
+    setError(null)
+    if (chainId != null && chainId !== MONAD_TESTNET_ID) {
+      setError('Switch your wallet to Monad Testnet to fetch blocks.')
+      return
     }
+    if (!publicClient) {
+      setError('Network not ready. Connect your wallet and switch to Monad Testnet.')
+      return
+    }
+    setLoadingBlocks(true)
+    try {
+      const latestBlock = await publicClient.getBlock({ blockTag: 'latest' })
+      const latestNum = Number(latestBlock.number)
+      // Fetch blocks sequentially to avoid RPC rate limits
+      const sauceBlock = await publicClient.getBlock({
+        blockNumber: BigInt(latestNum),
+        includeTransactions: true,
+      })
+      const cheeseBlock = await publicClient.getBlock({
+        blockNumber: BigInt(Math.max(1, latestNum - 1)),
+        includeTransactions: true,
+      })
+      const toppingBlock = await publicClient.getBlock({
+        blockNumber: BigInt(Math.max(1, latestNum - 2)),
+        includeTransactions: true,
+      })
+      setBlocks({ sauce: sauceBlock, cheese: cheeseBlock, topping: toppingBlock })
+    } catch (err) {
+      const msg = err?.shortMessage ?? err?.message ?? err?.cause?.message ?? String(err)
+      setError(msg || 'Failed to fetch blocks')
+    } finally {
+      setLoadingBlocks(false)
+    }
+  }
 
-    fetchBlocks()
-  }, [publicClient])
-
-  // Log transaction hashes and fees (sauces, cheeses, toppings) to console when blocks are loaded
-  useEffect(() => {
-    if (!blocks.sauce || !blocks.cheese || !blocks.topping) return
-    const arr = buildTxHashesAndFees(blocks, formatEther)
-    console.log('Transaction hashes and fees (sauce → cheese → topping):', arr)
-  }, [blocks.sauce, blocks.cheese, blocks.topping])
-
-  const mm = String(Math.floor(timeLeft / 60)).padStart(2, '0')
-  const ss = String(timeLeft % 60).padStart(2, '0')
-
-  const selectedSauce = selectedTxHash.sauce
-    ? (() => {
-        const tx = blocks.sauce?.transactions?.find((t) => t.hash === selectedTxHash.sauce)
-        return tx ? mapMethodIdToIngredient(getMethodId(tx.input), 'sauce') : null
-      })()
-    : null
-
-  const selectedCheese = selectedTxHash.cheese
-    ? (() => {
-        const tx = blocks.cheese?.transactions?.find((t) => t.hash === selectedTxHash.cheese)
-        return tx ? mapMethodIdToIngredient(getMethodId(tx.input), 'cheese') : null
-      })()
-    : null
-
-  const selectedTopping = selectedTxHash.topping
-    ? (() => {
-        const tx = blocks.topping?.transactions?.find((t) => t.hash === selectedTxHash.topping)
-        return tx ? mapMethodIdToIngredient(getMethodId(tx.input), 'topping') : null
-      })()
-    : null
+  const selectedSauce = selectedTxHash.sauce ? hashToIngredient(selectedTxHash.sauce, 'sauce') : null
+  const selectedCheese = selectedTxHash.cheese ? hashToIngredient(selectedTxHash.cheese, 'cheese') : null
+  const selectedTopping = selectedTxHash.topping ? hashToIngredient(selectedTxHash.topping, 'topping') : null
 
   const handleTxClick = (txHash, category) => {
     setSelectedTxHash((prev) => ({
@@ -251,36 +432,34 @@ export default function GamePage() {
 
   const handleResetPizza = () => {
     setSelectedTxHash({ sauce: null, cheese: null, topping: null })
-    setTimeLeft(60)
   }
 
   const shortAddress = address ? `${address.slice(0, 6)}…${address.slice(-4)}` : ''
 
-  // Build legend mapping grouped by category
+  // Legend: txn hash → ingredient using contract formula (hashToTopping / hashToSauce / hashToCheese); order randomized per category
   const legendByCategory = useMemo(() => {
     const groups = { sauce: [], cheese: [], topping: [] }
-    const categories = ['sauce', 'cheese', 'topping']
-    categories.forEach((cat) => {
-      const block = blocks[cat]
-      if (block?.transactions) {
-        block.transactions.forEach((tx) => {
-          if (tx.hash && tx.input) {
-            const ingredient = mapMethodIdToIngredient(getMethodId(tx.input), cat)
-            if (ingredient) {
-              groups[cat].push({ hash: tx.hash, ...ingredient })
-            }
-          }
-        })
-      }
+    if (!hasRound) return groups
+    ;['sauce', 'cheese', 'topping'].forEach((cat) => {
+      const list = roundOptionData[cat] || []
+      list.forEach(({ hash, fee }) => {
+        const ingredient = hashToIngredient(hash, cat)
+        if (hash && ingredient) groups[cat].push({ hash: typeof hash === 'string' ? hash : '0x' + hash.toString(16), fee, ...ingredient })
+      })
+      groups[cat] = shuffleArray(groups[cat])
     })
     return groups
-  }, [blocks])
+  }, [hasRound, roundOptionData])
 
   return (
     <div className="game-shell">
       <header className="game-header">
         <h1 className="game-title">Monad Pizza Forge</h1>
         <p className="game-subtitle">Build the perfect pizza from on-chain ingredients.</p>
+        <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 12, marginTop: 4, fontSize: 12, color: 'rgba(255,255,255,0.7)' }}>
+          <span>Contract: {PIZZA_CONTRACT_ADDRESS ? `${PIZZA_CONTRACT_ADDRESS.slice(0, 10)}…` : 'Not set'}</span>
+          <span>Chain: {chainId === MONAD_TESTNET_ID ? 'Monad Testnet' : chainId != null ? `ID ${chainId} (switch to Monad Testnet)` : '—'}</span>
+        </div>
         {isConnected && (
           <div className="wallet-bar">
             <span className="wallet-address">{shortAddress}</span>
@@ -299,127 +478,198 @@ export default function GamePage() {
           <div className="oven-shelf" />
         </div>
 
-        {/* Left: Transaction cards in 3 layers */}
+        {/* Left: Round options (txn hashes) or blocks for owner to start round */}
         <section className="panel panel-transactions">
           <div className="transactions-header">
-            <h2 className="panel-title">Transactions</h2>
-            {loading && <span className="loading-text">Loading blocks…</span>}
-            {error && <span className="error-text">{error}</span>}
+            <h2 className="panel-title">{hasRound ? 'Round options' : 'Transactions'}</h2>
+            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 2 }}>
+              {!PIZZA_CONTRACT_ADDRESS && (
+                <span className="error-text">Set VITE_PIZZA_CONTRACT_ADDRESS in .env and restart dev server</span>
+              )}
+              {loadingBlocks && <span className="loading-text">Loading blocks…</span>}
+              {(error || writeError?.message) && (
+                <span className="error-text">{error || writeError?.message}</span>
+              )}
+            </div>
           </div>
+          {!hasRound && (
+            <div className="transactions-header" style={{ marginBottom: 8, flexWrap: 'wrap', gap: 8 }}>
+              <button type="button" className="btn btn-secondary" onClick={fetchBlocks} disabled={loadingBlocks}>
+                {loadingBlocks ? 'Loading…' : 'Fetch blocks'}
+              </button>
+              {isOwner && PIZZA_CONTRACT_ADDRESS && (
+                <>
+                  <button
+                    type="button"
+                    className="btn btn-primary"
+                    onClick={handleStartRound}
+                    disabled={!blocks.sauce?.transactions?.length || !blocks.cheese?.transactions?.length || !blocks.topping?.transactions?.length || isWritePending}
+                  >
+                    {isWritePending ? 'Starting…' : 'Start round'}
+                  </button>
+                  {(startRoundFeedback || isWritePending) && (
+                    <span className="loading-text" style={{ fontSize: 12 }}>
+                      {startRoundFeedback || 'Confirm in your wallet'}
+                    </span>
+                  )}
+                </>
+              )}
+            </div>
+          )}
+          {hasRound && isOwner && PIZZA_CONTRACT_ADDRESS && (
+            <div className="transactions-header" style={{ marginBottom: 8, flexWrap: 'wrap', gap: 8 }}>
+              <button
+                type="button"
+                className="btn btn-primary"
+                onClick={handleFinalizeRound}
+                disabled={isWritePending}
+              >
+                {isWritePending ? 'Finalizing…' : 'Finalize round'}
+              </button>
+            </div>
+          )}
+          {hasRound && timeLeft <= 0 && isOwner && PIZZA_CONTRACT_ADDRESS && (
+            <div className="transactions-header" style={{ marginBottom: 8, flexWrap: 'wrap', gap: 8 }}>
+              <button type="button" className="btn btn-secondary" onClick={fetchBlocks} disabled={loadingBlocks}>
+                {loadingBlocks ? 'Loading…' : 'Fetch blocks'}
+              </button>
+              <button
+                type="button"
+                className="btn btn-primary"
+                onClick={handleStartRound}
+                disabled={!blocks.sauce?.transactions?.length || !blocks.cheese?.transactions?.length || !blocks.topping?.transactions?.length || isWritePending}
+              >
+                {isWritePending ? 'Starting…' : 'Start new round'}
+              </button>
+              {(startRoundFeedback || isWritePending) && (
+                <span className="loading-text" style={{ fontSize: 12 }}>
+                  {startRoundFeedback || 'Confirm in your wallet'}
+                </span>
+              )}
+            </div>
+          )}
           <div className="transactions-layers">
-            {/* Sauce layer */}
-            <div className="transaction-layer">
-              <h3 className="layer-title">Sauce Block #{blocks.sauce?.number ? String(blocks.sauce.number) : '—'}</h3>
-              <div className="transaction-cards">
-                {blocks.sauce?.transactions?.map((tx) => {
-                  const isSelected = selectedTxHash.sauce === tx.hash
-                  const fee = calculateFee(tx, blocks.sauce)
-                  return (
-                    <div key={tx.hash} className="tx-card-wrap">
-                      <button
-                        type="button"
-                        className={`transaction-card${isSelected ? ' transaction-card--selected' : ''}`}
-                        onClick={() => handleTxClick(tx.hash, 'sauce')}
-                      >
-                        <div className="tx-row">
-                          <span className="tx-label">Hash</span>
-                          <span className="tx-value tx-hash">{formatHash(tx.hash)}</span>
+            {hasRound ? (
+              <>
+                <div className="transaction-layer transaction-layer--sauce">
+                  <h3 className="layer-title">Sauce</h3>
+                  <div className="transaction-cards">
+                    {roundOptionData.sauce.map(({ hash, fee }, i) => {
+                      const h = typeof hash === 'string' ? hash : '0x' + hash.toString(16)
+                      const isSelected = selectedTxHash.sauce === h
+                      return (
+                        <div key={i} className="tx-card-wrap">
+                          <button type="button" className={`transaction-card${isSelected ? ' transaction-card--selected' : ''}`} onClick={() => handleTxClick(h, 'sauce')}>
+                            <div className="tx-row">
+                              <span className="tx-value tx-hash">{formatHash(h)}</span>
+                            </div>
+                          </button>
+                          <div className="tx-fee-below">{formatFeeMon(fee, formatEther)}</div>
                         </div>
-                        <div className="tx-row">
-                          <span className="tx-label">Method ID</span>
-                          <span className="tx-value">{getMethodId(tx.input)}</span>
+                      )
+                    })}
+                  </div>
+                </div>
+                <div className="transaction-layer transaction-layer--cheese">
+                  <h3 className="layer-title">Cheese</h3>
+                  <div className="transaction-cards">
+                    {roundOptionData.cheese.map(({ hash, fee }, i) => {
+                      const h = typeof hash === 'string' ? hash : '0x' + hash.toString(16)
+                      const isSelected = selectedTxHash.cheese === h
+                      return (
+                        <div key={i} className="tx-card-wrap">
+                          <button type="button" className={`transaction-card${isSelected ? ' transaction-card--selected' : ''}`} onClick={() => handleTxClick(h, 'cheese')}>
+                            <div className="tx-row">
+                              <span className="tx-value tx-hash">{formatHash(h)}</span>
+                            </div>
+                          </button>
+                          <div className="tx-fee-below">{formatFeeMon(fee, formatEther)}</div>
                         </div>
-                        <div className="tx-row">
-                          <span className="tx-label">From</span>
-                          <span className="tx-value">{formatAddress(tx.from)}</span>
+                      )
+                    })}
+                  </div>
+                </div>
+                <div className="transaction-layer transaction-layer--topping">
+                  <h3 className="layer-title">Toppings</h3>
+                  <div className="transaction-cards">
+                    {roundOptionData.topping.map(({ hash, fee }, i) => {
+                      const h = typeof hash === 'string' ? hash : '0x' + hash.toString(16)
+                      const isSelected = selectedTxHash.topping === h
+                      return (
+                        <div key={i} className="tx-card-wrap">
+                          <button type="button" className={`transaction-card${isSelected ? ' transaction-card--selected' : ''}`} onClick={() => handleTxClick(h, 'topping')}>
+                            <div className="tx-row">
+                              <span className="tx-value tx-hash">{formatHash(h)}</span>
+                            </div>
+                          </button>
+                          <div className="tx-fee-below">{formatFeeMon(fee, formatEther)}</div>
                         </div>
-                        <div className="tx-row">
-                          <span className="tx-label">To</span>
-                          <span className="tx-value">{tx.to ? formatAddress(tx.to) : 'Contract'}</span>
+                      )
+                    })}
+                  </div>
+                </div>
+              </>
+            ) : (
+              <>
+                <div className="transaction-layer transaction-layer--sauce">
+                  <h3 className="layer-title">Sauce Block #{blocks.sauce?.number ?? '—'}</h3>
+                  <div className="transaction-cards">
+                    {blocks.sauce?.transactions?.map((tx) => {
+                      const isSelected = selectedTxHash.sauce === tx.hash
+                      const fee = calculateFee(tx, blocks.sauce)
+                      return (
+                        <div key={tx.hash} className="tx-card-wrap">
+                          <button type="button" className={`transaction-card${isSelected ? ' transaction-card--selected' : ''}`} onClick={() => handleTxClick(tx.hash, 'sauce')}>
+                            <div className="tx-row">
+                              <span className="tx-value tx-hash">{formatHash(tx.hash)}</span>
+                            </div>
+                          </button>
+                          <div className="tx-fee-below">{formatFeeMon(fee, formatEther)}</div>
                         </div>
-                      </button>
-                      <div className="tx-fee-below">{formatFeeMon(fee, formatEther)}</div>
-                    </div>
-                  )
-                })}
-              </div>
-            </div>
-
-            {/* Cheese layer */}
-            <div className="transaction-layer">
-              <h3 className="layer-title">Cheese Block #{blocks.cheese?.number ? String(blocks.cheese.number) : '—'}</h3>
-              <div className="transaction-cards">
-                {blocks.cheese?.transactions?.map((tx) => {
-                  const isSelected = selectedTxHash.cheese === tx.hash
-                  const fee = calculateFee(tx, blocks.cheese)
-                  return (
-                    <div key={tx.hash} className="tx-card-wrap">
-                      <button
-                        type="button"
-                        className={`transaction-card${isSelected ? ' transaction-card--selected' : ''}`}
-                        onClick={() => handleTxClick(tx.hash, 'cheese')}
-                      >
-                        <div className="tx-row">
-                          <span className="tx-label">Hash</span>
-                          <span className="tx-value tx-hash">{formatHash(tx.hash)}</span>
+                      )
+                    }) ?? []}
+                  </div>
+                </div>
+                <div className="transaction-layer transaction-layer--cheese">
+                  <h3 className="layer-title">Cheese Block #{blocks.cheese?.number ?? '—'}</h3>
+                  <div className="transaction-cards">
+                    {blocks.cheese?.transactions?.map((tx) => {
+                      const isSelected = selectedTxHash.cheese === tx.hash
+                      const fee = calculateFee(tx, blocks.cheese)
+                      return (
+                        <div key={tx.hash} className="tx-card-wrap">
+                          <button type="button" className={`transaction-card${isSelected ? ' transaction-card--selected' : ''}`} onClick={() => handleTxClick(tx.hash, 'cheese')}>
+                            <div className="tx-row">
+                              <span className="tx-value tx-hash">{formatHash(tx.hash)}</span>
+                            </div>
+                          </button>
+                          <div className="tx-fee-below">{formatFeeMon(fee, formatEther)}</div>
                         </div>
-                        <div className="tx-row">
-                          <span className="tx-label">Method ID</span>
-                          <span className="tx-value">{getMethodId(tx.input)}</span>
+                      )
+                    }) ?? []}
+                  </div>
+                </div>
+                <div className="transaction-layer transaction-layer--topping">
+                  <h3 className="layer-title">Topping Block #{blocks.topping?.number ?? '—'}</h3>
+                  <div className="transaction-cards">
+                    {blocks.topping?.transactions?.map((tx) => {
+                      const isSelected = selectedTxHash.topping === tx.hash
+                      const fee = calculateFee(tx, blocks.topping)
+                      return (
+                        <div key={tx.hash} className="tx-card-wrap">
+                          <button type="button" className={`transaction-card${isSelected ? ' transaction-card--selected' : ''}`} onClick={() => handleTxClick(tx.hash, 'topping')}>
+                            <div className="tx-row">
+                              <span className="tx-value tx-hash">{formatHash(tx.hash)}</span>
+                            </div>
+                          </button>
+                          <div className="tx-fee-below">{formatFeeMon(fee, formatEther)}</div>
                         </div>
-                        <div className="tx-row">
-                          <span className="tx-label">From</span>
-                          <span className="tx-value">{formatAddress(tx.from)}</span>
-                        </div>
-                        <div className="tx-row">
-                          <span className="tx-label">To</span>
-                          <span className="tx-value">{tx.to ? formatAddress(tx.to) : 'Contract'}</span>
-                        </div>
-                      </button>
-                      <div className="tx-fee-below">{formatFeeMon(fee, formatEther)}</div>
-                    </div>
-                  )
-                })}
-              </div>
-            </div>
-
-            {/* Topping layer */}
-            <div className="transaction-layer">
-              <h3 className="layer-title">Topping Block #{blocks.topping?.number ? String(blocks.topping.number) : '—'}</h3>
-              <div className="transaction-cards">
-                {blocks.topping?.transactions?.map((tx) => {
-                  const isSelected = selectedTxHash.topping === tx.hash
-                  const fee = calculateFee(tx, blocks.topping)
-                  return (
-                    <div key={tx.hash} className="tx-card-wrap">
-                      <button
-                        type="button"
-                        className={`transaction-card${isSelected ? ' transaction-card--selected' : ''}`}
-                        onClick={() => handleTxClick(tx.hash, 'topping')}
-                      >
-                        <div className="tx-row">
-                          <span className="tx-label">Hash</span>
-                          <span className="tx-value tx-hash">{formatHash(tx.hash)}</span>
-                        </div>
-                        <div className="tx-row">
-                          <span className="tx-label">Method ID</span>
-                          <span className="tx-value">{getMethodId(tx.input)}</span>
-                        </div>
-                        <div className="tx-row">
-                          <span className="tx-label">From</span>
-                          <span className="tx-value">{formatAddress(tx.from)}</span>
-                        </div>
-                        <div className="tx-row">
-                          <span className="tx-label">To</span>
-                          <span className="tx-value">{tx.to ? formatAddress(tx.to) : 'Contract'}</span>
-                        </div>
-                      </button>
-                      <div className="tx-fee-below">{formatFeeMon(fee, formatEther)}</div>
-                    </div>
-                  )
-                })}
-              </div>
-            </div>
+                      )
+                    }) ?? []}
+                  </div>
+                </div>
+              </>
+            )}
           </div>
         </section>
 
@@ -427,9 +677,9 @@ export default function GamePage() {
         <section className="panel panel-play-area">
           <div className="play-top-row">
             <div className="timer-chip">
-              <span className="timer-label">Time</span>
+              <span className="timer-label">Time left</span>
               <span className="timer-value">
-                {mm}:{ss}
+                {hasRound ? `${String(Math.floor(timeLeft / 60)).padStart(2, '0')}:${String(timeLeft % 60).padStart(2, '0')}` : '—'}
               </span>
             </div>
           </div>
@@ -464,14 +714,27 @@ export default function GamePage() {
               </div>
             </div>
           </div>
-          <div className="play-actions">
-            <button className="btn btn-secondary" type="button" onClick={handleResetPizza}>
-              Reset Pizza
+          <div className="play-actions" style={{ minHeight: 80 }}>
+            <p className="legend-empty" style={{ marginBottom: 6 }}>
+              {hasRound ? '' : null}
+            </p>
+            <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'center' }}>
+              <button className="btn btn-secondary" type="button" onClick={handleResetPizza} aria-label="Reset pizza selection">
+                Reset Pizza
+              </button>
+              <button
+              className="btn btn-primary"
+              type="button"
+              onClick={handleSendToOven}
+              disabled={!hasRound || timeLeft <= 0 || !selectedTxHash.sauce || !selectedTxHash.cheese || !selectedTxHash.topping || isWritePending}
+            >
+              {isWritePending ? 'Submitting…' : 'Send to Oven'}
             </button>
-            <button className="btn btn-primary" type="button">
-              Send to Oven
-            </button>
+            </div>
           </div>
+          {!hasRound && PIZZA_CONTRACT_ADDRESS && (
+            <p className="legend-empty" style={{ marginTop: 8 }}>No active round. Owner can start one with &quot;Start round&quot;.</p>
+          )}
         </section>
 
         {/* Right: Order and Legend */}
@@ -511,7 +774,7 @@ export default function GamePage() {
                 <p className="legend-empty">No transactions loaded yet.</p>
               ) : (
                 <>
-                  <div className="legend-group">
+                  <div className="legend-group legend-group--sauce">
                     <h4 className="legend-category-label">Sauce</h4>
                     <div className="legend-list">
                       {legendByCategory.sauce.slice(0, 12).map((item) => (
@@ -523,7 +786,7 @@ export default function GamePage() {
                       ))}
                     </div>
                   </div>
-                  <div className="legend-group">
+                  <div className="legend-group legend-group--cheese">
                     <h4 className="legend-category-label">Cheese</h4>
                     <div className="legend-list">
                       {legendByCategory.cheese.slice(0, 12).map((item) => (
@@ -535,7 +798,7 @@ export default function GamePage() {
                       ))}
                     </div>
                   </div>
-                  <div className="legend-group">
+                  <div className="legend-group legend-group--topping">
                     <h4 className="legend-category-label">Toppings</h4>
                     <div className="legend-list">
                       {legendByCategory.topping.slice(0, 12).map((item) => (
