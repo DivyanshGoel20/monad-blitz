@@ -132,11 +132,13 @@ function buildTxHashesAndFees(blocks, formatEtherFn) {
     { key: 'topping', label: 'topping' },
   ]
   for (const { key, label } of categories) {
-    const block = blocks[key]
-    const txs = Array.isArray(block?.transactions) ? block.transactions : []
-    for (const tx of txs) {
-      const fee = calculateFee(tx, block)
-      out.push({ type: label, hash: tx.hash, fee: feeAsNumber(fee, formatEtherFn) })
+    const blockList = Array.isArray(blocks[key]) ? blocks[key] : []
+    for (const block of blockList) {
+      const txs = Array.isArray(block?.transactions) ? block.transactions : []
+      for (const tx of txs) {
+        const fee = calculateFee(tx, block)
+        out.push({ type: label, hash: tx.hash, fee: feeAsNumber(fee, formatEtherFn) })
+      }
     }
   }
   return out
@@ -172,7 +174,7 @@ export default function GamePage() {
   const { data: startRoundReceipt } = useWaitForTransactionReceipt({ hash: pendingStartRoundHash })
 
   const [selectedTxHash, setSelectedTxHash] = useState({ sauce: null, cheese: null, topping: null })
-  const [blocks, setBlocks] = useState({ sauce: null, cheese: null, topping: null })
+  const [blocks, setBlocks] = useState({ sauce: [], cheese: [], topping: [] })
   const [loadingBlocks, setLoadingBlocks] = useState(false)
   const [error, setError] = useState(null)
   const [startRoundFeedback, setStartRoundFeedback] = useState(null)
@@ -311,8 +313,11 @@ export default function GamePage() {
   const handleStartRound = () => {
     setStartRoundFeedback('Preparing…')
     setError(null)
-    if (!pizzaContract?.address || !blocks.sauce?.transactions?.length || !blocks.cheese?.transactions?.length || !blocks.topping?.transactions?.length) {
-      setError('Fetch blocks first and ensure each block has transactions')
+    const sauceTxs = (blocks.sauce ?? []).flatMap((b) => b.transactions ?? [])
+    const cheeseTxs = (blocks.cheese ?? []).flatMap((b) => b.transactions ?? [])
+    const toppingTxs = (blocks.topping ?? []).flatMap((b) => b.transactions ?? [])
+    if (!pizzaContract?.address || !sauceTxs.length || !cheeseTxs.length || !toppingTxs.length) {
+      setError('Fetch blocks first and ensure each category has transactions')
       setStartRoundFeedback(null)
       return
     }
@@ -328,9 +333,9 @@ export default function GamePage() {
     const toPairs = (block) => (block?.transactions ?? [])
       .map((tx) => withBytes32(tx, block))
       .filter(Boolean)
-    const saucePairs = toPairs(blocks.sauce)
-    const cheesePairs = toPairs(blocks.cheese)
-    const toppingPairs = toPairs(blocks.topping)
+    const saucePairs = (blocks.sauce ?? []).flatMap(toPairs)
+    const cheesePairs = (blocks.cheese ?? []).flatMap(toPairs)
+    const toppingPairs = (blocks.topping ?? []).flatMap(toPairs)
     const sauceHashes = saucePairs.map((p) => p.hash)
     const sauceFees = saucePairs.map((p) => p.fee)
     const cheeseHashes = cheesePairs.map((p) => p.hash)
@@ -439,20 +444,20 @@ export default function GamePage() {
     try {
       const latestBlock = await publicClient.getBlock({ blockTag: 'latest' })
       const latestNum = Number(latestBlock.number)
-      // Fetch blocks sequentially to avoid RPC rate limits
-      const sauceBlock = await publicClient.getBlock({
-        blockNumber: BigInt(latestNum),
-        includeTransactions: true,
+      // Sauce: latest + 1 before. Cheese: 2 and 3 behind. Topping: 4 and 5 behind.
+      const [sauceBlock1, sauceBlock2, cheeseBlock1, cheeseBlock2, toppingBlock1, toppingBlock2] = await Promise.all([
+        publicClient.getBlock({ blockNumber: BigInt(latestNum), includeTransactions: true }),
+        publicClient.getBlock({ blockNumber: BigInt(Math.max(1, latestNum - 1)), includeTransactions: true }),
+        publicClient.getBlock({ blockNumber: BigInt(Math.max(1, latestNum - 2)), includeTransactions: true }),
+        publicClient.getBlock({ blockNumber: BigInt(Math.max(1, latestNum - 3)), includeTransactions: true }),
+        publicClient.getBlock({ blockNumber: BigInt(Math.max(1, latestNum - 4)), includeTransactions: true }),
+        publicClient.getBlock({ blockNumber: BigInt(Math.max(1, latestNum - 5)), includeTransactions: true }),
+      ])
+      setBlocks({
+        sauce: [sauceBlock1, sauceBlock2],
+        cheese: [cheeseBlock1, cheeseBlock2],
+        topping: [toppingBlock1, toppingBlock2],
       })
-      const cheeseBlock = await publicClient.getBlock({
-        blockNumber: BigInt(Math.max(1, latestNum - 1)),
-        includeTransactions: true,
-      })
-      const toppingBlock = await publicClient.getBlock({
-        blockNumber: BigInt(Math.max(1, latestNum - 2)),
-        includeTransactions: true,
-      })
-      setBlocks({ sauce: sauceBlock, cheese: cheeseBlock, topping: toppingBlock })
     } catch (err) {
       const msg = err?.shortMessage ?? err?.message ?? err?.cause?.message ?? String(err)
       setError(msg || 'Failed to fetch blocks')
@@ -562,7 +567,7 @@ export default function GamePage() {
                     type="button"
                     className="btn btn-primary"
                     onClick={handleStartRound}
-                    disabled={!blocks.sauce?.transactions?.length || !blocks.cheese?.transactions?.length || !blocks.topping?.transactions?.length || isWritePending}
+                    disabled={!(blocks.sauce ?? []).flatMap((b) => b.transactions ?? []).length || !(blocks.cheese ?? []).flatMap((b) => b.transactions ?? []).length || !(blocks.topping ?? []).flatMap((b) => b.transactions ?? []).length || isWritePending}
                   >
                     {isWritePending ? 'Starting…' : 'Start round'}
                   </button>
@@ -596,7 +601,7 @@ export default function GamePage() {
                 type="button"
                 className="btn btn-primary"
                 onClick={handleStartRound}
-                disabled={!blocks.sauce?.transactions?.length || !blocks.cheese?.transactions?.length || !blocks.topping?.transactions?.length || isWritePending}
+                disabled={!(blocks.sauce ?? []).flatMap((b) => b.transactions ?? []).length || !(blocks.cheese ?? []).flatMap((b) => b.transactions ?? []).length || !(blocks.topping ?? []).flatMap((b) => b.transactions ?? []).length || isWritePending}
               >
                 {isWritePending ? 'Starting…' : 'Start new round'}
               </button>
@@ -671,11 +676,13 @@ export default function GamePage() {
             ) : (
               <>
                 <div className="transaction-layer transaction-layer--sauce">
-                  <h3 className="layer-title">Sauce Block #{blocks.sauce?.number ?? '—'}</h3>
+                  <h3 className="layer-title">
+                    Sauce Blocks #{(blocks.sauce ?? []).map((b) => b.number).join(', #') || '—'}
+                  </h3>
                   <div className="transaction-cards">
-                    {blocks.sauce?.transactions?.map((tx) => {
+                    {(blocks.sauce ?? []).flatMap((b) => (b.transactions ?? []).map((tx) => ({ tx, block: b }))).map(({ tx, block }) => {
                       const isSelected = selectedTxHash.sauce === tx.hash
-                      const fee = calculateFee(tx, blocks.sauce)
+                      const fee = calculateFee(tx, block)
                       return (
                         <div key={tx.hash} className="tx-card-wrap">
                           <button type="button" className={`transaction-card${isSelected ? ' transaction-card--selected' : ''}`} onClick={() => handleTxClick(tx.hash, 'sauce')}>
@@ -686,15 +693,17 @@ export default function GamePage() {
                           <div className="tx-fee-below">{formatFeeMon(fee, formatEther)}</div>
                         </div>
                       )
-                    }) ?? []}
+                    })}
                   </div>
                 </div>
                 <div className="transaction-layer transaction-layer--cheese">
-                  <h3 className="layer-title">Cheese Block #{blocks.cheese?.number ?? '—'}</h3>
+                  <h3 className="layer-title">
+                    Cheese Blocks #{(blocks.cheese ?? []).map((b) => b.number).join(', #') || '—'}
+                  </h3>
                   <div className="transaction-cards">
-                    {blocks.cheese?.transactions?.map((tx) => {
+                    {(blocks.cheese ?? []).flatMap((b) => (b.transactions ?? []).map((tx) => ({ tx, block: b }))).map(({ tx, block }) => {
                       const isSelected = selectedTxHash.cheese === tx.hash
-                      const fee = calculateFee(tx, blocks.cheese)
+                      const fee = calculateFee(tx, block)
                       return (
                         <div key={tx.hash} className="tx-card-wrap">
                           <button type="button" className={`transaction-card${isSelected ? ' transaction-card--selected' : ''}`} onClick={() => handleTxClick(tx.hash, 'cheese')}>
@@ -705,15 +714,17 @@ export default function GamePage() {
                           <div className="tx-fee-below">{formatFeeMon(fee, formatEther)}</div>
                         </div>
                       )
-                    }) ?? []}
+                    })}
                   </div>
                 </div>
                 <div className="transaction-layer transaction-layer--topping">
-                  <h3 className="layer-title">Topping Block #{blocks.topping?.number ?? '—'}</h3>
+                  <h3 className="layer-title">
+                    Topping Blocks #{(blocks.topping ?? []).map((b) => b.number).join(', #') || '—'}
+                  </h3>
                   <div className="transaction-cards">
-                    {blocks.topping?.transactions?.map((tx) => {
+                    {(blocks.topping ?? []).flatMap((b) => (b.transactions ?? []).map((tx) => ({ tx, block: b }))).map(({ tx, block }) => {
                       const isSelected = selectedTxHash.topping === tx.hash
-                      const fee = calculateFee(tx, blocks.topping)
+                      const fee = calculateFee(tx, block)
                       return (
                         <div key={tx.hash} className="tx-card-wrap">
                           <button type="button" className={`transaction-card${isSelected ? ' transaction-card--selected' : ''}`} onClick={() => handleTxClick(tx.hash, 'topping')}>
@@ -724,7 +735,7 @@ export default function GamePage() {
                           <div className="tx-fee-below">{formatFeeMon(fee, formatEther)}</div>
                         </div>
                       )
-                    }) ?? []}
+                    })}
                   </div>
                 </div>
               </>
