@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { useAccount, useDisconnect, usePublicClient, useReadContract, useWriteContract } from 'wagmi'
+import { useAccount, useDisconnect, usePublicClient, useReadContract, useWaitForTransactionReceipt, useWriteContract } from 'wagmi'
 import { formatEther } from 'viem'
 import { pizzaContract, PIZZA_CONTRACT_ADDRESS } from '../contracts/pizza'
 import { pizzaAbi } from '../contracts/pizzaAbi'
@@ -165,12 +165,16 @@ export default function GamePage() {
   const MONAD_TESTNET_ID = 10143
   const publicClient = usePublicClient()
   const { mutate: writePizzaMutate, isPending: isWritePending, error: writeError } = useWriteContract()
+  const [pendingFinalizeHash, setPendingFinalizeHash] = useState(null)
+
+  const { data: finalizeReceipt } = useWaitForTransactionReceipt({ hash: pendingFinalizeHash })
 
   const [selectedTxHash, setSelectedTxHash] = useState({ sauce: null, cheese: null, topping: null })
   const [blocks, setBlocks] = useState({ sauce: null, cheese: null, topping: null })
   const [loadingBlocks, setLoadingBlocks] = useState(false)
   const [error, setError] = useState(null)
   const [startRoundFeedback, setStartRoundFeedback] = useState(null)
+  const [showBakingGif, setShowBakingGif] = useState(false)
 
   const contractAddress = pizzaContract?.address ?? undefined
   const contractAbi = pizzaContract?.abi ?? undefined
@@ -201,6 +205,37 @@ export default function GamePage() {
     ...readContractConfig,
     functionName: 'getRoundOptionLengths',
   })
+  const { data: lastWinner, refetch: refetchLastWinner } = useReadContract({
+    ...readContractConfig,
+    functionName: 'lastWinner',
+  })
+  const { data: lastWinnerTimeTaken = 0n, refetch: refetchLastWinnerTimeTaken } = useReadContract({
+    ...readContractConfig,
+    functionName: 'lastWinnerTimeTaken',
+  })
+  const { data: lastWinnerTotalFee = 0n, refetch: refetchLastWinnerTotalFee } = useReadContract({
+    ...readContractConfig,
+    functionName: 'lastWinnerTotalFee',
+  })
+  const { data: lastFinalizedRoundId = 0n, refetch: refetchLastFinalizedRoundId } = useReadContract({
+    ...readContractConfig,
+    functionName: 'lastFinalizedRoundId',
+  })
+
+  useEffect(() => {
+    if (!finalizeReceipt || !pendingFinalizeHash) return
+    refetchLastWinner()
+    refetchLastWinnerTimeTaken()
+    refetchLastWinnerTotalFee()
+    refetchLastFinalizedRoundId()
+    setPendingFinalizeHash(null)
+  }, [finalizeReceipt, pendingFinalizeHash, refetchLastWinner, refetchLastWinnerTimeTaken, refetchLastWinnerTotalFee, refetchLastFinalizedRoundId])
+
+  useEffect(() => {
+    if (lastFinalizedRoundId != null && currentRoundId != null && Number(lastFinalizedRoundId) === Number(currentRoundId) && Number(currentRoundId) > 0) {
+      setShowBakingGif(false)
+    }
+  }, [lastFinalizedRoundId, currentRoundId])
 
   const isOwner = address && owner && address.toLowerCase() === owner.toLowerCase()
   const hasRound = currentRoundId != null && Number(currentRoundId) > 0
@@ -336,7 +371,8 @@ export default function GamePage() {
         chainId: MONAD_TESTNET_ID,
       },
       {
-        onSuccess: () => {
+        onSuccess: (hash) => {
+          setPendingFinalizeHash(hash)
           setTimeout(() => {
             refetchCurrentRoundId()
             refetchCurrentRoundOrder()
@@ -371,6 +407,7 @@ export default function GamePage() {
         chainId: MONAD_TESTNET_ID,
       },
       {
+        onSuccess: () => setShowBakingGif(true),
         onError: (err) => {
           const msg = err?.shortMessage ?? err?.message ?? err?.cause?.message ?? 'Failed to submit build'
           setError(typeof msg === 'string' ? msg : 'Failed to submit build')
@@ -453,6 +490,23 @@ export default function GamePage() {
 
   return (
     <div className="game-shell">
+      {showBakingGif && (
+        <div className="baking-gif-overlay" aria-hidden="true">
+          <div className="baking-gif-backdrop" />
+          <div className="baking-gif-wrap">
+            <iframe
+              src="https://tenor.com/embed/10919962664205650525"
+              width="100%"
+              height="100%"
+              frameBorder="0"
+              allowFullScreen
+              title="Pizza baking"
+              className="baking-gif-iframe"
+            />
+            <p className="baking-gif-label">Pizza in the oven… waiting for round to be finalized.</p>
+          </div>
+        </div>
+      )}
       <header className="game-header">
         <h1 className="game-title">Monad Pizza Forge</h1>
         <p className="game-subtitle">Build the perfect pizza from on-chain ingredients.</p>
@@ -763,6 +817,35 @@ export default function GamePage() {
               </div>
             </div>
           </div>
+
+          {/* Winner (after finalize) */}
+          {lastFinalizedRoundId != null && Number(lastFinalizedRoundId) > 0 && (
+            <div className="order-section" style={{ marginTop: 16 }}>
+              <h2 className="panel-title">Last round winner</h2>
+              <div className="order-card">
+                <div className="order-item-row">
+                  <span className="order-label">Round</span>
+                  <span className="order-value">{String(lastFinalizedRoundId)}</span>
+                </div>
+                <div className="order-item-row">
+                  <span className="order-label">Winner</span>
+                  <span className="order-value tx-hash" title={typeof lastWinner === 'string' ? lastWinner : ''}>
+                    {lastWinner != null && String(lastWinner).toLowerCase() !== '0x0000000000000000000000000000000000000000'
+                      ? (typeof lastWinner === 'string' ? `${lastWinner.slice(0, 6)}…${lastWinner.slice(-4)}` : '—')
+                      : 'No correct submissions'}
+                  </span>
+                </div>
+                <div className="order-item-row">
+                  <span className="order-label">Time</span>
+                  <span className="order-value">{lastWinnerTimeTaken != null ? `${Number(lastWinnerTimeTaken)}s` : '—'}</span>
+                </div>
+                <div className="order-item-row">
+                  <span className="order-label">Total fee</span>
+                  <span className="order-value">{lastWinnerTotalFee != null ? formatFeeMon(lastWinnerTotalFee, formatEther) : '—'}</span>
+                </div>
+              </div>
+            </div>
+          )}
 
           {/* Bottom right: Legend */}
           <div className="legend-section">
