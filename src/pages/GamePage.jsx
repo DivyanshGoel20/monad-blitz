@@ -166,8 +166,10 @@ export default function GamePage() {
   const publicClient = usePublicClient()
   const { mutate: writePizzaMutate, isPending: isWritePending, error: writeError } = useWriteContract()
   const [pendingFinalizeHash, setPendingFinalizeHash] = useState(null)
+  const [pendingStartRoundHash, setPendingStartRoundHash] = useState(null)
 
   const { data: finalizeReceipt } = useWaitForTransactionReceipt({ hash: pendingFinalizeHash })
+  const { data: startRoundReceipt } = useWaitForTransactionReceipt({ hash: pendingStartRoundHash })
 
   const [selectedTxHash, setSelectedTxHash] = useState({ sauce: null, cheese: null, topping: null })
   const [blocks, setBlocks] = useState({ sauce: null, cheese: null, topping: null })
@@ -229,10 +231,16 @@ export default function GamePage() {
     refetchLastWinnerTotalFee()
     refetchLastFinalizedRoundId()
     setPendingFinalizeHash(null)
-    // Refresh so all players (including host) see new round state
     const t = setTimeout(() => window.location.reload(), 1500)
     return () => clearTimeout(t)
   }, [finalizeReceipt, pendingFinalizeHash, refetchLastWinner, refetchLastWinnerTimeTaken, refetchLastWinnerTotalFee, refetchLastFinalizedRoundId])
+
+  useEffect(() => {
+    if (!startRoundReceipt || !pendingStartRoundHash) return
+    setPendingStartRoundHash(null)
+    const t = setTimeout(() => window.location.reload(), 1500)
+    return () => clearTimeout(t)
+  }, [startRoundReceipt, pendingStartRoundHash])
 
   useEffect(() => {
     if (lastFinalizedRoundId != null && currentRoundId != null && Number(lastFinalizedRoundId) === Number(currentRoundId) && Number(currentRoundId) > 0) {
@@ -343,15 +351,9 @@ export default function GamePage() {
       chainId: MONAD_TESTNET_ID,
     }
     writePizzaMutate(variables, {
-      onSuccess: () => {
+      onSuccess: (hash) => {
         setStartRoundFeedback(null)
-        // Refetch round data so timer and options update
-        setTimeout(() => {
-          refetchCurrentRoundId()
-          refetchCurrentRoundOrder()
-          refetchRoundDeadline()
-          refetchOptionLengths()
-        }, 500)
+        setPendingStartRoundHash(hash)
       },
       onError: (err) => {
         const msg = err?.shortMessage ?? err?.message ?? err?.cause?.message ?? 'Failed to start round'
