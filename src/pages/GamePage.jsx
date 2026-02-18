@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useAccount, useDisconnect, usePublicClient, useReadContract, useWaitForTransactionReceipt, useWriteContract } from 'wagmi'
 import { formatEther } from 'viem'
@@ -175,7 +175,6 @@ export default function GamePage() {
   const [error, setError] = useState(null)
   const [startRoundFeedback, setStartRoundFeedback] = useState(null)
   const [showBakingGif, setShowBakingGif] = useState(false)
-  const roundEndRefreshScheduled = useRef(false)
 
   const contractAddress = pizzaContract?.address ?? undefined
   const contractAbi = pizzaContract?.abi ?? undefined
@@ -256,14 +255,6 @@ export default function GamePage() {
     const id = setInterval(tick, 1000)
     return () => clearInterval(id)
   }, [hasRound, roundDeadline])
-
-  // Refresh all players when round time runs out so everyone sees updated state (once per round)
-  useEffect(() => {
-    if (!hasRound || timeLeft !== 0 || roundEndRefreshScheduled.current) return
-    roundEndRefreshScheduled.current = true
-    const t = setTimeout(() => window.location.reload(), 2000)
-    return () => clearTimeout(t)
-  }, [hasRound, timeLeft])
 
   const lengths = roundOptionLengths != null
     ? (Array.isArray(roundOptionLengths)
