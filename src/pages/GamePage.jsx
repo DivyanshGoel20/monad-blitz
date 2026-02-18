@@ -513,8 +513,8 @@ export default function GamePage() {
         </div>
       )}
       <header className="game-header">
-        <h1 className="game-title">Monad Pizza Forge</h1>
-        <p className="game-subtitle">Build the perfect pizza from on-chain ingredients.</p>
+        <h1 className="game-title">Monad Pizzeria</h1>
+        <p className="game-subtitle">Create the next 10,000 MON pizza</p>
         <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 12, marginTop: 4, fontSize: 12, color: 'rgba(255,255,255,0.7)' }}>
           <span>Contract: {PIZZA_CONTRACT_ADDRESS ? `${PIZZA_CONTRACT_ADDRESS.slice(0, 10)}…` : 'Not set'}</span>
           <span>Chain: {chainId === MONAD_TESTNET_ID ? 'Monad Testnet' : chainId != null ? `ID ${chainId} (switch to Monad Testnet)` : '—'}</span>
@@ -552,7 +552,7 @@ export default function GamePage() {
             </div>
           </div>
           {!hasRound && (
-            <div className="transactions-header" style={{ marginBottom: 8, flexWrap: 'wrap', gap: 8 }}>
+            <div className="transactions-actions">
               <button type="button" className="btn btn-secondary" onClick={fetchBlocks} disabled={loadingBlocks}>
                 {loadingBlocks ? 'Loading…' : 'Fetch blocks'}
               </button>
@@ -576,7 +576,7 @@ export default function GamePage() {
             </div>
           )}
           {hasRound && isOwner && PIZZA_CONTRACT_ADDRESS && (
-            <div className="transactions-header" style={{ marginBottom: 8, flexWrap: 'wrap', gap: 8 }}>
+            <div className="transactions-actions">
               <button
                 type="button"
                 className="btn btn-primary"
@@ -588,7 +588,7 @@ export default function GamePage() {
             </div>
           )}
           {hasRound && timeLeft <= 0 && isOwner && PIZZA_CONTRACT_ADDRESS && (
-            <div className="transactions-header" style={{ marginBottom: 8, flexWrap: 'wrap', gap: 8 }}>
+            <div className="transactions-actions">
               <button type="button" className="btn btn-secondary" onClick={fetchBlocks} disabled={loadingBlocks}>
                 {loadingBlocks ? 'Loading…' : 'Fetch blocks'}
               </button>

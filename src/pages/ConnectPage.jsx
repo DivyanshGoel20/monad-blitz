@@ -27,9 +27,9 @@ export default function ConnectPage() {
   return (
     <div className="connect-page">
       <div className="connect-card">
-        <h1 className="connect-title">Monad Pizza Forge</h1>
+        <h1 className="connect-title">Monad Pizzeria</h1>
         <p className="connect-subtitle">
-          Connect your wallet on Monad Testnet to start building pizzas.
+          Create the next 10,000 MON pizza
         </p>
 
         <div className="connect-actions">
