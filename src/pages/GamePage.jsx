@@ -54,17 +54,20 @@ const SAUCE_GRADIENTS = {
 }
 
 // Cheese and toppings inside the sauce with clear gaps between each piece
-// Cheese: 3×3 grid at 28% / 50% / 72% (~22% gap between pieces)
+// Cheese: scattered like toppings (ring + middle), not a rigid grid
 const CHEESE_SPREAD = [
-  { top: '28%', left: '28%' }, { top: '28%', left: '50%' }, { top: '28%', left: '72%' },
-  { top: '50%', left: '28%' }, { top: '50%', left: '50%' }, { top: '50%', left: '72%' },
-  { top: '72%', left: '28%' }, { top: '72%', left: '50%' }, { top: '72%', left: '72%' },
+  { top: '19%', left: '22%' }, { top: '19%', left: '52%' }, { top: '19%', left: '77%' },
+  { top: '42%', left: '19%' }, { top: '42%', left: '75%' },
+  { top: '52%', left: '19%' }, { top: '52%', left: '75%' },
+  { top: '77%', left: '27%' }, { top: '77%', left: '52%' }, { top: '77%', left: '75%' },
 ]
-// Toppings: ring + middle row, offset from cheese so layers don’t stack (~20% gaps)
+// Toppings: ring + middle row, shifted a bit left and up so they sit centered on the sauce don’t stack (~20% gaps)
 const TOPPING_SPREAD = [
-  { top: '32%', left: '35%' }, { top: '32%', left: '65%' }, { top: '38%', left: '32%' }, { top: '38%', left: '68%' },
-  { top: '50%', left: '35%' }, { top: '50%', left: '65%' }, { top: '62%', left: '32%' }, { top: '62%', left: '68%' },
-  { top: '68%', left: '50%' }, { top: '38%', left: '50%' },
+  { top: '25%', left: '35%' }, { top: '25%', left: '59%' },
+  { top: '35%', left: '22%' }, { top: '35%', left: '72%' },
+  { top: '49%', left: '27%' }, { top: '49%', left: '67%' },
+  { top: '59%', left: '22%' }, { top: '59%', left: '72%' },
+  { top: '72%', left: '35%' }, { top: '72%', left: '59%' },
 ]
 
 const EXPLORER_URL = 'https://testnet.monadscan.com'
